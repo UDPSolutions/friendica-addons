@@ -10,6 +10,7 @@ use Akeeba\S3\Exception\CannotDeleteFile;
 use Akeeba\S3\Input;
 use Friendica\Core\Storage\Capability\ICanWriteToStorage;
 use Friendica\Core\Storage\Exception\StorageException;
+use Friendica\Database\DBA;
 use Friendica\Util\Strings;
 
 /**
@@ -88,10 +89,14 @@ class S3Client implements ICanWriteToStorage
 		try {
 			$input = Input::createFromData($data);
 			$this->connector->putObject($input, $this->bucket, $this->pathForRef($reference));
-			return $reference;
 		} catch (\Exception $exception) {
 			throw new StorageException(sprintf('Cannot put data for reference %s', $reference), $exception->getCode(), $exception);
 		}
+
+		$size = strlen($data);
+		$this->trackUpload($reference, $size);
+
+		return $reference;
 	}
 
 	/** {@inheritDoc} */
@@ -101,6 +106,53 @@ class S3Client implements ICanWriteToStorage
 			$this->connector->deleteObject($this->bucket, $this->pathForRef($reference));
 		} catch (CannotDeleteFile $exception) {
 			throw new StorageException(sprintf('Cannot delete reference %s', $reference), $exception->getCode(), $exception);
+		}
+
+		$this->trackDelete($reference);
+	}
+
+	private function trackUpload(string $reference, int $size): void
+	{
+		if (empty($this->prefix)) {
+			return;
+		}
+		try {
+			DBA::insert('udp_r2_object_sizes', [
+				'reference'  => $reference,
+				'size_bytes' => $size,
+				'created_at' => date('Y-m-d H:i:s'),
+			], true);
+			DBA::e(
+				'INSERT INTO `udp_storage_usage` (slot_domain, r2_bytes, updated_at)
+				 VALUES (?, ?, NOW())
+				 ON DUPLICATE KEY UPDATE r2_bytes = r2_bytes + ?, updated_at = NOW()',
+				$this->prefix, $size, $size
+			);
+		} catch (\Exception $e) {
+			// Non-fatal — metrics drift is acceptable; a missing row is not.
+		}
+	}
+
+	private function trackDelete(string $reference): void
+	{
+		if (empty($this->prefix)) {
+			return;
+		}
+		try {
+			$row = DBA::selectFirst('udp_r2_object_sizes', ['size_bytes'], ['reference' => $reference]);
+			if (!$row) {
+				return;
+			}
+			$size = (int) $row['size_bytes'];
+			DBA::delete('udp_r2_object_sizes', ['reference' => $reference]);
+			DBA::e(
+				'UPDATE `udp_storage_usage`
+				 SET r2_bytes = GREATEST(0, CAST(r2_bytes AS SIGNED) - ?), updated_at = NOW()
+				 WHERE slot_domain = ?',
+				$size, $this->prefix
+			);
+		} catch (\Exception $e) {
+			// Non-fatal.
 		}
 	}
 }
