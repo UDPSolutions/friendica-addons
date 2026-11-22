@@ -96,6 +96,30 @@ class S3Client implements ICanWriteToStorage
 		return substr((string) $data, 0, $to - $from + 1);
 	}
 
+	/**
+	 * UDP: write bytes $from..$to (inclusive) of an object straight to $fp as they
+	 * arrive from S3, without holding them in memory. Used to stream HTTP Range
+	 * responses to the browser (with $fp = php://output). Akeeba closes $fp.
+	 *
+	 * @param resource $fp
+	 * @throws StorageException
+	 */
+	public function streamRange(string $reference, int $from, int $to, $fp): void
+	{
+		if ($to < 1) {
+			// See getRange(): Akeeba drops the Range header when $to is 0.
+			fwrite($fp, $this->getRange($reference, $from, $to));
+			fclose($fp);
+			return;
+		}
+
+		try {
+			$this->connector->getObject($this->bucket, $this->pathForRef($reference), $fp, $from, $to);
+		} catch (\RuntimeException $exception) {
+			throw new StorageException(sprintf('Cannot stream range of reference %s', $reference), $exception->getCode(), $exception);
+		}
+	}
+
 	/** {@inheritDoc} */
 	public function put(string $data, string $reference = ""): string
 	{
