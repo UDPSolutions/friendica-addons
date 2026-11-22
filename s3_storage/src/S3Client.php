@@ -75,6 +75,27 @@ class S3Client implements ICanWriteToStorage
 		}
 	}
 
+	/**
+	 * UDP: fetch only bytes $from..$to (inclusive) of an object, for HTTP Range
+	 * responses in Module\Attach. Not part of the storage interface — callers
+	 * check method_exists() and fall back to get() + substr() for other backends.
+	 *
+	 * @throws StorageException
+	 */
+	public function getRange(string $reference, int $from, int $to): string
+	{
+		// Akeeba only sends a Range header when $to is non-zero, so "bytes=0-0"
+		// would silently fetch the whole object. Ask for two bytes and trim.
+		$askTo = max($to, 1);
+		try {
+			$data = $this->connector->getObject($this->bucket, $this->pathForRef($reference), false, $from, $askTo);
+		} catch (\RuntimeException $exception) {
+			throw new StorageException(sprintf('Cannot get range of reference %s', $reference), $exception->getCode(), $exception);
+		}
+
+		return substr((string) $data, 0, $to - $from + 1);
+	}
+
 	/** {@inheritDoc} */
 	public function put(string $data, string $reference = ""): string
 	{
